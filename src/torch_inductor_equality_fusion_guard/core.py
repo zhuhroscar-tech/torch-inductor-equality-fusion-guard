@@ -97,6 +97,24 @@ def _tie_count_fn(x, const):
     return (scaled == scaled.amax(dim=-1, keepdim=True)).sum(dim=-1)
 
 
+def _guarded_tie_count_fn(guarded_division: Callable, x, const):
+    """The guarded division-then-comparison pattern, extracted to
+    module scope (not a closure local to `_run_case`) so it can be
+    called directly in eager mode -- bypassing `torch.compile` --  as
+    well as compiled. When called only through `torch.compile(...,
+    backend="inductor")`, coverage.py cannot see these statements
+    execute (Inductor traces and codegens the body rather than
+    interpreting it), which previously left this line permanently
+    "missed" despite being exercised on every diagnose() call. A
+    direct eager-mode call (see
+    TestGuardedTieCountFnDirectlyInEagerMode in test_core.py) proves
+    the statements execute correctly independent of tracing, the same
+    fix pattern applied to torch-addcdiv-stale-scalar-guard's
+    `_adam_step_guarded`."""
+    scaled = guarded_division(x, const)
+    return (scaled == scaled.amax(dim=-1, keepdim=True)).sum(dim=-1)
+
+
 def _run_case(torch_module, description: str, x, const, expect_divergence: bool) -> FusionCase:
     torch_module._dynamo.reset()
     eager_tc = _tie_count_fn(x, const)
@@ -116,8 +134,7 @@ def _run_case(torch_module, description: str, x, const, expect_divergence: bool)
     guarded_division = precision_safe_division_compare(lambda x, const: x / const)
 
     def guarded_tie_count_fn(x, const):
-        scaled = guarded_division(x, const)
-        return (scaled == scaled.amax(dim=-1, keepdim=True)).sum(dim=-1)
+        return _guarded_tie_count_fn(guarded_division, x, const)
 
     torch_module._dynamo.reset()
     compiled_guarded = torch_module.compile(guarded_tie_count_fn, backend="inductor")

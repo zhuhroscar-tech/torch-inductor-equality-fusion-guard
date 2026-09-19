@@ -27,6 +27,8 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from torch_inductor_equality_fusion_guard.core import (
+    _guarded_tie_count_fn,
+    _tie_count_fn,
     diagnose,
     precision_safe_division_compare,
 )
@@ -148,3 +150,36 @@ class TestDiagnose:
         }
         for case in report["cases"]:
             assert expected_keys.issubset(case.keys())
+
+
+class TestGuardedTieCountFnDirectlyInEagerMode:
+    """`_guarded_tie_count_fn` was previously only reachable through
+    `torch.compile(..., backend="inductor")`, which coverage.py cannot
+    see into (Inductor codegens the traced graph rather than
+    interpreting the Python body). Calling it directly in eager mode
+    proves its own statements execute correctly, independent of
+    whether tracing/compilation is involved at all."""
+
+    def test_matches_plain_eager_tie_count(self):
+        torch.manual_seed(7)
+        x = torch.randn(12, 5, dtype=torch.bfloat16)
+        const = 4.0
+        guarded_division = precision_safe_division_compare(lambda x, const: x / const)
+
+        result = _guarded_tie_count_fn(guarded_division, x, const)
+        expected = _tie_count_fn(x, const)
+
+        assert result.tolist() == expected.tolist()
+
+    def test_returns_tie_counts_not_raw_scaled_values(self):
+        # A structural check that the function returns a count per row
+        # (reduced along the last dim), not the elementwise comparison
+        # itself -- guards against an accidental `.sum(dim=-1)` removal.
+        x = torch.tensor([[1.0, 1.0, 2.0], [3.0, 3.0, 3.0]], dtype=torch.bfloat16)
+        const = 1.0
+        guarded_division = precision_safe_division_compare(lambda x, const: x / const)
+
+        result = _guarded_tie_count_fn(guarded_division, x, const)
+
+        assert result.shape == (2,)
+        assert result.tolist() == [1, 3]
